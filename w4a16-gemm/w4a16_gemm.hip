@@ -9,7 +9,7 @@ typedef float f32x8 __attribute__((ext_vector_type(8)));
 
 namespace {
 
-constexpr int BM = 256, BN = 128, WM = 4, WN = 2, BK = 32, PAD = 8, GROUP = 128;
+constexpr int BN = 128, WM = 4, WN = 2, BK = 32, PAD = 8, GROUP = 128;
 
 __device__ __forceinline__ uint32_t rne_bits(float f) {
     const uint32_t u = __float_as_uint(f);
@@ -20,6 +20,7 @@ __device__ __forceinline__ float bf16_round(float f) {
     return __uint_as_float(rne_bits(f) & 0xFFFF0000u);
 }
 
+template <int BM>
 __global__ void __launch_bounds__(WM * WN * 32)
 w4a16_gemm_kernel(const uint16_t * __restrict__ x, const uint8_t * __restrict__ w,
                   const _Float16 * __restrict__ scales, uint16_t * __restrict__ out,
@@ -172,9 +173,17 @@ extern "C" int w4a16_gemm(const void * x, const void * w, const void * scales, v
     if (M <= 0 || N % BN != 0 || K % GROUP != 0 || ldx % 8 != 0) {
         return 1;
     }
-    dim3 grid(N / BN, (M + BM - 1) / BM);
-    hipLaunchKernelGGL(w4a16_gemm_kernel, grid, dim3(WM * WN * 32), 0, (hipStream_t) stream,
-                       (const uint16_t *) x, (const uint8_t *) w, (const _Float16 *) scales,
-                       (uint16_t *) out, M, K, ldx, ldo);
+    constexpr int SMALL_BM = 128, LARGE_BM = 256;
+    const int bm = M < 1024 ? SMALL_BM : LARGE_BM;
+    dim3 grid(N / BN, (M + bm - 1) / bm);
+    if (bm == SMALL_BM) {
+        hipLaunchKernelGGL(w4a16_gemm_kernel<SMALL_BM>, grid, dim3(WM * WN * 32), 0, (hipStream_t) stream,
+                           (const uint16_t *) x, (const uint8_t *) w, (const _Float16 *) scales,
+                           (uint16_t *) out, M, K, ldx, ldo);
+    } else {
+        hipLaunchKernelGGL(w4a16_gemm_kernel<LARGE_BM>, grid, dim3(WM * WN * 32), 0, (hipStream_t) stream,
+                           (const uint16_t *) x, (const uint8_t *) w, (const _Float16 *) scales,
+                           (uint16_t *) out, M, K, ldx, ldo);
+    }
     return hipGetLastError() == hipSuccess ? 0 : 2;
 }
